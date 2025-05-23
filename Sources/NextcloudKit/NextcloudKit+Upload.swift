@@ -166,7 +166,7 @@ public extension NextcloudKit {
         #endif
 
         #if os(visionOS) || os(iOS)
-        if freeDisk < fileNameLocalSize * 4 {
+        if freeDisk < Int64(fileNameLocalSize * (fileNameLocalSize > 536870912 ? 2.1 : 4)) // Int64 -> 500 MB
             // It seems there is not enough space to send the file
             let error = NKError(errorCode: NKError.chunkNoEnoughMemory, errorDescription: "_chunk_enough_memory_")
             return completion(account, nil, nil, nil, error)
