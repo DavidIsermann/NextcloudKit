@@ -9,6 +9,11 @@ public final class FileNameValidator: Sendable {
     private let forbiddenFileNameBasenames: [String]
     private let forbiddenFileNameCharacters: [String]
     private let forbiddenFileNameExtensions: [String]
+    private let capabilities: NKCapabilities.Capabilities
+
+    public func fileEmptyNameError() -> NKError {
+        NKError(errorCode: NSURLErrorCannotCreateFile, errorDescription: NSLocalizedString("_file_name_empty_", value: "File name cannot be empty.", comment: ""))
+    }
 
     public func fileWithSpaceError() -> NKError {
         NKError(errorCode: NSURLErrorCannotCreateFile, errorDescription: NSLocalizedString("_file_name_validator_error_space_", value: "Name must not contain spaces at the beginning or end.", comment: ""))
@@ -32,14 +37,23 @@ public final class FileNameValidator: Sendable {
         return NKError(errorCode: NSURLErrorCannotCreateFile, errorDescription: errorMessage)
     }
 
-    public init(forbiddenFileNames: [String], forbiddenFileNameBasenames: [String], forbiddenFileNameCharacters: [String], forbiddenFileNameExtensions: [String]) {
-        self.forbiddenFileNames = forbiddenFileNames.map { $0.uppercased() }
-        self.forbiddenFileNameBasenames = forbiddenFileNameBasenames.map { $0.uppercased() }
-        self.forbiddenFileNameCharacters = forbiddenFileNameCharacters
-        self.forbiddenFileNameExtensions = forbiddenFileNameExtensions.map { $0.uppercased() }
+    public init(capabilities: NKCapabilities.Capabilities) {
+        self.forbiddenFileNames = capabilities.forbiddenFileNames.map { $0.uppercased() }
+        self.forbiddenFileNameBasenames = capabilities.forbiddenFileNameBasenames.map { $0.uppercased() }
+        self.forbiddenFileNameCharacters = capabilities.forbiddenFileNameCharacters
+        self.forbiddenFileNameExtensions = capabilities.forbiddenFileNameExtensions.map { $0.uppercased() }
+        self.capabilities = capabilities
     }
 
     public func checkFileName(_ filename: String) -> NKError? {
+        if !capabilities.shouldEnforceWindowsCompatibleFilenames {
+            return nil
+        }
+
+        if filename.trimmingCharacters(in: .whitespaces).isEmpty {
+            return fileEmptyNameError()
+        }
+
         if let regex = try? NSRegularExpression(pattern: "[\(forbiddenFileNameCharacters.joined())]"), let invalidCharacterError = checkInvalidCharacters(string: filename, regex: regex) {
             return invalidCharacterError
         }

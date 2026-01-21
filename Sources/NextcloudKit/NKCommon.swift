@@ -6,17 +6,18 @@
 import Foundation
 import Alamofire
 
-#if os(iOS)
-import MobileCoreServices
-#else
-import CoreServices
-#endif
+public enum NKTypeReachability: Int, Sendable {
+    case unknown = 0
+    case notReachable = 1
+    case reachableEthernetOrWiFi = 2
+    case reachableCellular = 3
+}
 
 public protocol NextcloudKitDelegate: AnyObject, Sendable {
-    func authenticationChallenge(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void)
+    func authenticationChallenge(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @Sendable @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void)
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession)
 
-    func networkReachabilityObserver(_ typeReachability: NKCommon.TypeReachability)
+    func networkReachabilityObserver(_ typeReachability: NKTypeReachability)
 
     func request<Value>(_ request: DataRequest, didParseResponse response: AFDataResponse<Value>)
 
@@ -33,7 +34,7 @@ public extension NextcloudKitDelegate {
     func authenticationChallenge(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) { }
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) { }
 
-    func networkReachabilityObserver(_ typeReachability: NKCommon.TypeReachability) { }
+    func networkReachabilityObserver(_ typeReachability: NKTypeReachability) { }
 
     func request<Value>(_ request: DataRequest, didParseResponse response: AFDataResponse<Value>) { }
 
@@ -47,15 +48,21 @@ public extension NextcloudKitDelegate {
 }
 
 public struct NKCommon: Sendable {
-    public var nksessions = ThreadSafeArray<NKSession>()
+    public var nksessions = SynchronizedNKSessionArray()
     public var delegate: NextcloudKitDelegate?
     public var groupIdentifier: String?
+    public let typeIdentifiers: NKTypeIdentifiers = .shared
+
+    // Roor fileName folder
+    public let rootFileName: String = ".__NC_ROOT__"
 
     // Foreground
     public let identifierSessionDownload: String = "com.nextcloud.nextcloudkit.session.download"
     public let identifierSessionUpload: String = "com.nextcloud.nextcloudkit.session.upload"
     // Background
     public let identifierSessionDownloadBackground: String = "com.nextcloud.session.downloadbackground"
+    public let identifierSessionDownloadBackgroundExt: String = "com.nextcloud.session.downloadextension"
+
     public let identifierSessionUploadBackground: String = "com.nextcloud.session.uploadbackground"
     public let identifierSessionUploadBackgroundWWan: String = "com.nextcloud.session.uploadbackgroundWWan"
     public let identifierSessionUploadBackgroundExt: String = "com.nextcloud.session.uploadextension"
@@ -66,386 +73,210 @@ public struct NKCommon: Sendable {
     public let backgroundQueue = DispatchQueue(label: "com.nextcloud.nextcloudkit.backgroundqueue", qos: .background, attributes: .concurrent)
     private let logQueue = DispatchQueue(label: "com.nextcloud.nextcloudkit.queuelog", attributes: .concurrent )
 
-    public let notificationCenterChunkedFileStop = NSNotification.Name(rawValue: "NextcloudKit.chunkedFile.stop")
-
     public let headerAccount = "X-NC-Account"
     public let headerCheckInterceptor = "X-NC-CheckInterceptor"
     public let groupDefaultsUnauthorized = "Unauthorized"
     public let groupDefaultsUnavailable = "Unavailable"
     public let groupDefaultsToS = "ToS"
 
-    public enum TypeReachability: Int {
-        case unknown = 0
-        case notReachable = 1
-        case reachableEthernetOrWiFi = 2
-        case reachableCellular = 3
-    }
-
-    public enum TypeClassFile: String {
-        case audio = "audio"
-        case compress = "compress"
-        case directory = "directory"
-        case document = "document"
-        case image = "image"
-        case unknow = "unknow"
-        case url = "url"
-        case video = "video"
-    }
-
-    public enum TypeIconFile: String {
-        case audio = "audio"
-        case code = "code"
-        case compress = "compress"
-        case directory = "directory"
-        case document = "document"
-        case image = "image"
-        case movie = "movie"
-        case pdf = "pdf"
-        case ppt = "ppt"
-        case txt = "txt"
-        case unknow = "file"
-        case url = "url"
-        case xls = "xls"
-    }
-
-    public struct UTTypeConformsToServer: Sendable {
-        var typeIdentifier: String
-        var classFile: String
-        var editor: String
-        var iconName: String
-        var name: String
-        var account: String
-    }
-
-#if swift(<6.0)
-    internal var utiCache = NSCache<NSString, CFString>()
-    internal var mimeTypeCache = NSCache<CFString, NSString>()
-    internal var filePropertiesCache = NSCache<CFString, NKFileProperty>()
-#else
-    internal var utiCache = [String: String]()
-    internal var mimeTypeCache = [String: String]()
-    internal var filePropertiesCache = [String: NKFileProperty]()
-#endif
-    internal var internalTypeIdentifiers = ThreadSafeArray<UTTypeConformsToServer>()
-
-    public var filenamePathLog: String = ""
-    public var levelLog: Int = 0
-    public var copyLogToDocumentDirectory: Bool = false
-    public var printLog: Bool = true
-
-    private var internalFilenameLog: String = "communication.log"
-    public var filenameLog: String {
-        get {
-            return internalFilenameLog
-        }
-        set(newVal) {
-            if !newVal.isEmpty {
-                internalFilenameLog = newVal
-                internalFilenameLog = internalPathLog + "/" + internalFilenameLog
-            }
-        }
-    }
-
-    private var internalPathLog: String = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true).first!
-    public var pathLog: String {
-        get {
-            return internalPathLog
-        }
-        set(newVal) {
-            var tempVal = newVal
-            if tempVal.last == "/" {
-                tempVal = String(tempVal.dropLast())
-            }
-            if !tempVal.isEmpty {
-                internalPathLog = tempVal
-                filenamePathLog = internalPathLog + "/" + internalFilenameLog
-            }
-        }
-    }
-
     // MARK: - Init
 
-    init() {
-        filenamePathLog = internalPathLog + "/" + internalFilenameLog
-    }
-
-    // MARK: - Type Identifier
-
-    mutating public func clearInternalTypeIdentifier(account: String) {
-        internalTypeIdentifiers = internalTypeIdentifiers.filter({ $0.account != account })
-    }
-
-    mutating public func addInternalTypeIdentifier(typeIdentifier: String, classFile: String, editor: String, iconName: String, name: String, account: String) {
-        if !internalTypeIdentifiers.contains(where: { $0.typeIdentifier == typeIdentifier && $0.editor == editor && $0.account == account}) {
-            let newUTI = UTTypeConformsToServer(typeIdentifier: typeIdentifier, classFile: classFile, editor: editor, iconName: iconName, name: name, account: account)
-            internalTypeIdentifiers.append(newUTI)
-        }
-    }
-
-    mutating public func getInternalType(fileName: String, mimeType: String, directory: Bool, account: String) -> (mimeType: String, classFile: String, iconName: String, typeIdentifier: String, fileNameWithoutExt: String, ext: String) {
-        var ext = (fileName as NSString).pathExtension.lowercased()
-        var mimeType = mimeType
-        var classFile = "", iconName = "", typeIdentifier = "", fileNameWithoutExt = ""
-        var inUTI: CFString?
-
-#if swift(<6.0)
-        if let cachedUTI = utiCache.object(forKey: ext as NSString) {
-            inUTI = cachedUTI
-        }
-#else
-        if let cachedUTI = utiCache[ext] {
-            inUTI = cachedUTI as CFString
-        }
-#endif
-        if inUTI == nil {
-            if let unmanagedFileUTI = UTTypeCreatePreferredIdentifierForTag(kUTTagClassFilenameExtension, ext as CFString, nil) {
-                inUTI = unmanagedFileUTI.takeRetainedValue()
-                if let inUTI {
-#if swift(<6.0)
-                    utiCache.setObject(inUTI, forKey: ext as NSString)
-#else
-                    utiCache[ext] = inUTI as String
-#endif
-                }
-            }
-        }
-
-        if let inUTI {
-            typeIdentifier = inUTI as String
-            fileNameWithoutExt = (fileName as NSString).deletingPathExtension
-
-            // contentType detect
-            if mimeType.isEmpty {
-#if swift(<6.0)
-                if let cachedMimeUTI = mimeTypeCache.object(forKey: inUTI) {
-                    mimeType = cachedMimeUTI as String
-                }
-#else
-                if let cachedMimeUTI = mimeTypeCache[inUTI as String] {
-                    mimeType = cachedMimeUTI
-                }
-#endif
-
-                if mimeType.isEmpty {
-                    if let mimeUTI = UTTypeCopyPreferredTagWithClass(inUTI, kUTTagClassMIMEType) {
-                        let mimeUTIString = mimeUTI.takeRetainedValue() as String
-
-                        mimeType = mimeUTIString
-#if swift(<6.0)
-                        mimeTypeCache.setObject(mimeUTIString as NSString, forKey: inUTI)
-#else
-                        mimeTypeCache[inUTI as String] = mimeUTIString as String
-#endif
-                    }
-                }
-            }
-
-            if directory {
-                mimeType = "httpd/unix-directory"
-                classFile = TypeClassFile.directory.rawValue
-                iconName = TypeIconFile.directory.rawValue
-                typeIdentifier = kUTTypeFolder as String
-                fileNameWithoutExt = fileName
-                ext = ""
-            } else {
-                var fileProperties: NKFileProperty
-
-#if swift(<6.0)
-                if let cachedFileProperties = filePropertiesCache.object(forKey: inUTI) {
-                    fileProperties = cachedFileProperties
-                } else {
-                    fileProperties = getFileProperties(inUTI: inUTI)
-                    filePropertiesCache.setObject(fileProperties, forKey: inUTI)
-                }
-#else
-                if let cachedFileProperties = filePropertiesCache[inUTI as String] {
-                    fileProperties = cachedFileProperties
-                } else {
-                    fileProperties = getFileProperties(inUTI: inUTI)
-                    filePropertiesCache[inUTI as String] = fileProperties
-                }
-#endif
-
-                classFile = fileProperties.classFile
-                iconName = fileProperties.iconName
-            }
-        }
-        return(mimeType: mimeType, classFile: classFile, iconName: iconName, typeIdentifier: typeIdentifier, fileNameWithoutExt: fileNameWithoutExt, ext: ext)
-    }
-
-    public func getFileProperties(inUTI: CFString) -> NKFileProperty {
-        let fileProperty = NKFileProperty()
-        let typeIdentifier: String = inUTI as String
-
-        if let fileExtension = UTTypeCopyPreferredTagWithClass(inUTI as CFString, kUTTagClassFilenameExtension) {
-            fileProperty.ext = String(fileExtension.takeRetainedValue())
-        }
-
-        if UTTypeConformsTo(inUTI, kUTTypeImage) {
-            fileProperty.classFile = TypeClassFile.image.rawValue
-            fileProperty.iconName = TypeIconFile.image.rawValue
-            fileProperty.name = "image"
-        } else if UTTypeConformsTo(inUTI, kUTTypeMovie) {
-            fileProperty.classFile = TypeClassFile.video.rawValue
-            fileProperty.iconName = TypeIconFile.movie.rawValue
-            fileProperty.name = "movie"
-        } else if UTTypeConformsTo(inUTI, kUTTypeAudio) {
-            fileProperty.classFile = TypeClassFile.audio.rawValue
-            fileProperty.iconName = TypeIconFile.audio.rawValue
-            fileProperty.name = "audio"
-        } else if UTTypeConformsTo(inUTI, kUTTypeZipArchive) {
-            fileProperty.classFile = TypeClassFile.compress.rawValue
-            fileProperty.iconName = TypeIconFile.compress.rawValue
-            fileProperty.name = "archive"
-        } else if UTTypeConformsTo(inUTI, kUTTypeHTML) {
-            fileProperty.classFile = TypeClassFile.document.rawValue
-            fileProperty.iconName = TypeIconFile.code.rawValue
-            fileProperty.name = "code"
-        } else if UTTypeConformsTo(inUTI, kUTTypePDF) {
-            fileProperty.classFile = TypeClassFile.document.rawValue
-            fileProperty.iconName = TypeIconFile.pdf.rawValue
-            fileProperty.name = "document"
-        } else if UTTypeConformsTo(inUTI, kUTTypeRTF) {
-            fileProperty.classFile = TypeClassFile.document.rawValue
-            fileProperty.iconName = TypeIconFile.txt.rawValue
-            fileProperty.name = "document"
-        } else if UTTypeConformsTo(inUTI, kUTTypeText) {
-            if fileProperty.ext.isEmpty { fileProperty.ext = "txt" }
-            fileProperty.classFile = TypeClassFile.document.rawValue
-            fileProperty.iconName = TypeIconFile.txt.rawValue
-            fileProperty.name = "text"
-        } else {
-            if let result = internalTypeIdentifiers.first(where: {$0.typeIdentifier == typeIdentifier}) {
-                fileProperty.classFile = result.classFile
-                fileProperty.iconName = result.iconName
-                fileProperty.name = result.name
-            } else {
-                if UTTypeConformsTo(inUTI, kUTTypeContent) {
-                    fileProperty.classFile = TypeClassFile.document.rawValue
-                    fileProperty.iconName = TypeIconFile.document.rawValue
-                    fileProperty.name = "document"
-                } else {
-                    fileProperty.classFile = TypeClassFile.unknow.rawValue
-                    fileProperty.iconName = TypeIconFile.unknow.rawValue
-                    fileProperty.name = "file"
-                }
-            }
-        }
-        return fileProperty
-    }
+    init() { }
 
     // MARK: - Chunked File
 
+    /// Async chunking version that mirrors the original callback-based API,
+    /// but returns the result and throws `NKError` with the same domain/codes.
+    /// - Error domain: "chunkedFile"
+    ///   - -1: Failed to open/read input
+    ///   - -2: Failed to create output directory / open chunk file
+    ///   - -3: Not enough disk space
+    ///   - -4: Write error
+    ///   - -5: Cancelled
     public func chunkedFile(inputDirectory: String,
                             outputDirectory: String,
                             fileName: String,
                             chunkSize: Int,
                             filesChunk: [(fileName: String, size: Int64)],
-                            numChunks: @escaping (_ num: Int) -> Void = { _ in },
-                            counterChunk: @escaping (_ counter: Int) -> Void = { _ in },
-                            completion: @escaping (_ filesChunk: [(fileName: String, size: Int64)]) -> Void = { _ in }) {
-        // Check if filesChunk is empty
-        if !filesChunk.isEmpty { return completion(filesChunk) }
-
-        defer {
-            NotificationCenter.default.removeObserver(self, name: notificationCenterChunkedFileStop, object: nil)
+                            chunkProgressHandler: @escaping (_ total: Int, _ counter: Int) -> Void = { _, _ in }) async throws -> [(fileName: String, size: Int64)] {
+        // If caller already has chunk list, recompute incremental sizes from disk and return.
+        if !filesChunk.isEmpty {
+            var recomputed: [(fileName: String, size: Int64)] = []
+            var running: Int64 = 0
+            for item in filesChunk {
+                try Task.checkCancellation()
+                let path = outputDirectory + "/" + item.fileName
+                let sz = getFileSize(filePath: path)
+                running += sz
+                recomputed.append((fileName: item.fileName, size: running))
+            }
+            return recomputed
         }
 
-        let fileManager: FileManager = .default
+        try Task.checkCancellation()
+
+        let fileManager = FileManager.default
         var isDirectory: ObjCBool = false
         var reader: FileHandle?
         var writer: FileHandle?
-        var chunk: Int = 0
-        var counter: Int = 1
+        var chunkWrittenBytes = 0
+        var counter = 1
         var incrementalSize: Int64 = 0
-        var filesChunk: [(fileName: String, size: Int64)] = []
-        var chunkSize = chunkSize
-        let bufferSize = 1000000
-        var stop: Bool = false
+        var resultChunks: [(fileName: String, size: Int64)] = []
+        var dynamicChunkSize = chunkSize
+        let bufferSize = 1_000_000
 
-        NotificationCenter.default.addObserver(forName: notificationCenterChunkedFileStop, object: nil, queue: nil) { _ in stop = true }
+        // Compute total size and planned chunk count (with edge-case inflation)
+        let inputFilePath = inputDirectory + "/" + fileName
+        let totalSize = getFileSize(filePath: inputFilePath)
+        var plannedCount: Int = totalSize > 0 ? Int(totalSize / Int64(chunkSize)) : 0
 
-        // If max chunk count is > 10000 (max count), add + 100 MB to the chunk size to reduce the count. This is an edge case.
-        var num: Int = Int(getFileSize(filePath: inputDirectory + "/" + fileName) / Int64(chunkSize))
-        if num > 10000 {
-            chunkSize = chunkSize + 100000000
+        if plannedCount > 10_000 {
+            dynamicChunkSize += 100_000_000 // add 100 MB to reduce the chunk count in extreme cases
+            plannedCount = totalSize > 0 ? Int(totalSize / Int64(dynamicChunkSize)) : 0
         }
-        num = Int(getFileSize(filePath: inputDirectory + "/" + fileName) / Int64(chunkSize))
-        numChunks(num)
 
+        // Ensure output directory exists
         if !fileManager.fileExists(atPath: outputDirectory, isDirectory: &isDirectory) {
             do {
                 try fileManager.createDirectory(atPath: outputDirectory, withIntermediateDirectories: true, attributes: nil)
             } catch {
-                return completion([])
+                throw NKError(errorCode: -2, errorDescription: "Failed to create the output directory for file chunks.")
             }
         }
 
+        // Open input file
         do {
-            reader = try .init(forReadingFrom: URL(fileURLWithPath: inputDirectory + "/" + fileName))
+            reader = try .init(forReadingFrom: URL(fileURLWithPath: inputFilePath))
         } catch {
-            return completion([])
+            throw NKError(errorCode: -1, errorDescription: "Failed to open the input file for reading.")
         }
 
-        repeat {
-            if stop {
-                return completion([])
+        defer {
+            // Always close I/O
+            try? writer?.close()
+            try? reader?.close()
+        }
+
+        // Helper: cooperative cancellation mapped to same error code
+        @inline(__always)
+        func checkCancelled() throws {
+            if Task.isCancelled {
+                throw NKError(errorCode: -5, errorDescription: "Chunking was cancelled.")
             }
-            if autoreleasepool(invoking: { () -> Int in
-                if chunk >= chunkSize {
-                    writer?.closeFile()
-                    writer = nil
-                    chunk = 0
-                    counterChunk(counter)
-                    debugPrint("[DEBUG] Counter: \(counter)")
-                    counter += 1
+        }
+
+        // Main loop
+        outerLoop: repeat {
+            // Periodically honor cancellation
+            try checkCancelled()
+
+            let result = autoreleasepool(invoking: { () -> Int in
+                // Extra cancellation points inside the pool
+                if Task.isCancelled {
+                    return -5
                 }
 
-                let chunkRemaining: Int = chunkSize - chunk
-                let buffer = reader?.readData(ofLength: min(bufferSize, chunkRemaining))
+                let remaining = chunkSize - chunkWrittenBytes
+                guard let rawBuffer = reader?.readData(ofLength: min(bufferSize, remaining)) else {
+                    return -1 // read failed
+                }
 
+                // EOF
+                if rawBuffer.isEmpty {
+                    if writer != nil {
+                        writer?.closeFile()
+                        writer = nil
+                        chunkProgressHandler(plannedCount, counter)
+                        counter += 1
+                    }
+                    return 0
+                }
+
+                let safeBuffer = Data(rawBuffer)
+
+                if Task.isCancelled {
+                    return -5
+                }
+
+                // Open next chunk lazily
                 if writer == nil {
                     let fileNameChunk = String(counter)
                     let outputFileName = outputDirectory + "/" + fileNameChunk
                     fileManager.createFile(atPath: outputFileName, contents: nil, attributes: nil)
                     do {
-                        writer = try .init(forWritingTo: URL(fileURLWithPath: outputFileName))
+                        writer = try FileHandle(forWritingTo: URL(fileURLWithPath: outputFileName))
                     } catch {
-                        filesChunk = []
-                        return 0
+                        return -2 // cannot open writer
                     }
-                    filesChunk.append((fileName: fileNameChunk, size: 0))
+                    resultChunks.append((fileName: fileNameChunk, size: 0))
                 }
 
-                if let buffer = buffer {
-                    writer?.write(buffer)
-                    chunk = chunk + buffer.count
-                    return buffer.count
+                // Check free disk space (best-effort)
+                if let free = try? URL(fileURLWithPath: outputDirectory)
+                    .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+                    .volumeAvailableCapacityForImportantUsage,
+                   free < Int64(safeBuffer.count * 2) {
+                    return -3 // not enough disk space
                 }
-                filesChunk = []
-                return 0
-            }) == 0 { break }
+
+                do {
+                    try writer?.write(contentsOf: safeBuffer)
+                    chunkWrittenBytes += safeBuffer.count
+
+                    if chunkWrittenBytes >= chunkSize {
+                        writer?.closeFile()
+                        writer = nil
+                        chunkWrittenBytes = 0
+                        chunkProgressHandler(plannedCount, counter)
+                        counter += 1
+                    }
+                    return 1 // OK
+                } catch {
+                    return -4 // write error
+                }
+            })
+
+            switch result {
+            case 0:
+                break outerLoop
+            case 1:
+                continue
+            case -1:
+                throw NKError(errorCode: -1, errorDescription: "Failed to read data from the input file.")
+            case -2:
+                throw NKError(errorCode: -2, errorDescription: "Failed to open the output chunk file for writing.")
+            case -3:
+                throw NKError(errorCode: -3, errorDescription: "There is not enough available disk space to proceed.")
+            case -4:
+                throw NKError(errorCode: -4, errorDescription: "Failed to write data to chunk file.")
+            case -5:
+                throw NKError(errorCode: -5, errorDescription: "Chunking was cancelled.")
+            default:
+                continue
+            }
         } while true
 
-        writer?.closeFile()
-        reader?.closeFile()
-
-        counter = 0
-        for fileChunk in filesChunk {
-            let size = getFileSize(filePath: outputDirectory + "/" + fileChunk.fileName)
-            incrementalSize = incrementalSize + size
-            filesChunk[counter].size = incrementalSize
-            counter += 1
+        // Recompute incremental sizes from disk
+        for i in 0..<resultChunks.count {
+            try checkCancelled()
+            let path = outputDirectory + "/" + resultChunks[i].fileName
+            let size = getFileSize(filePath: path)
+            incrementalSize += size
+            resultChunks[i].size = incrementalSize
         }
-        return completion(filesChunk)
+
+        try checkCancelled()
+        return resultChunks
     }
 
     // MARK: - Server Error GroupDefaults
 
-    public func appendServerErrorAccount(_ account: String, errorCode: Int) {
+    public func appendServerErrorAccount(_ account: String, errorCode: Int) async {
         guard let groupDefaults = UserDefaults(suiteName: groupIdentifier) else {
             return
         }
+        let capabilities = await NKCapabilities.shared.getCapabilities(for: account)
 
         /// Unavailable
         if errorCode == 503 {
@@ -464,7 +295,7 @@ public struct NKCommon: Sendable {
                 groupDefaults.set(array, forKey: NextcloudKit.shared.nkCommonInstance.groupDefaultsUnauthorized)
             }
         /// ToS
-        } else if errorCode == 403 {
+        } else if errorCode == 403, capabilities.termsOfService {
             var array = groupDefaults.array(forKey: NextcloudKit.shared.nkCommonInstance.groupDefaultsToS) as? [String] ?? []
 
             if !array.contains(account) {
@@ -480,18 +311,13 @@ public struct NKCommon: Sendable {
         return "\(identifier).\(account)"
     }
 
-    public func getSession(account: String) -> NKSession? {
-        var session: NKSession?
-        nksessions.forEach { result in
-            if result.account == account {
-                session = result
-            }
+    public func getStandardHeaders(account: String,
+                                   options: NKRequestOptions? = nil,
+                                   contentType: String? = nil,
+                                   accept: String? = nil) -> HTTPHeaders? {
+        guard let session = nksessions.session(forAccount: account) else {
+            return nil
         }
-        return session
-    }
-
-    public func getStandardHeaders(account: String, options: NKRequestOptions? = nil) -> HTTPHeaders? {
-        guard let session = nksessions.filter({ $0.account == account }).first else { return nil}
         var headers: HTTPHeaders = []
 
         headers.update(.authorization(username: session.user, password: session.password))
@@ -499,12 +325,12 @@ public struct NKCommon: Sendable {
         if let customUserAgent = options?.customUserAgent {
             headers.update(.userAgent(customUserAgent))
         }
-        if let contentType = options?.contentType {
+        if let contentType {
             headers.update(.contentType(contentType))
-        } else {
-            headers.update(.contentType("application/x-www-form-urlencoded"))
         }
-        if options?.contentType != "application/xml" {
+        if let accept {
+            headers.update(name: "Accept", value: accept)
+        } else {
             headers.update(name: "Accept", value: "application/json")
         }
         headers.update(name: "OCS-APIRequest", value: "true")
@@ -533,33 +359,12 @@ public struct NKCommon: Sendable {
         return headers
     }
 
-    public func createStandardUrl(serverUrl: String, endpoint: String, options: NKRequestOptions) -> URLConvertible? {
-        if let endpoint = options.endpoint {
-            return URL(string: endpoint)
-        }
+    public func createStandardUrl(serverUrl: String, endpoint: String) -> URLConvertible? {
         guard var serverUrl = serverUrl.urlEncoded else { return nil }
 
         if serverUrl.last != "/" { serverUrl = serverUrl + "/" }
         serverUrl = serverUrl + endpoint
         return serverUrl.asUrl
-    }
-
-    public func convertDate(_ dateString: String, format: String) -> Date? {
-        if dateString.isEmpty { return nil }
-        let dateFormatter = DateFormatter()
-
-        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
-        dateFormatter.dateFormat = format
-        guard let date = dateFormatter.date(from: dateString) else { return nil }
-        return date
-    }
-
-    func convertDate(_ date: Date, format: String) -> String? {
-        let dateFormatter = DateFormatter()
-
-        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
-        dateFormatter.dateFormat = format
-        return dateFormatter.string(from: date)
     }
 
     func findHeader(_ header: String, allHeaderFields: [AnyHashable: Any]?) -> String? {
@@ -616,47 +421,5 @@ public struct NKCommon: Sendable {
             }
         }
         return nil
-    }
-
-    // MARK: - Log
-
-    public func clearFileLog() {
-        FileManager.default.createFile(atPath: filenamePathLog, contents: nil, attributes: nil)
-        if copyLogToDocumentDirectory, let path = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true).first {
-            let filenameCopyToDocumentDirectory = path + "/" + filenameLog
-            FileManager.default.createFile(atPath: filenameCopyToDocumentDirectory, contents: nil, attributes: nil)
-
-        }
-    }
-
-    public func writeLog(_ text: String?) {
-        guard let text = text else { return }
-        guard let date = self.convertDate(Date(), format: "yyyy-MM-dd' 'HH:mm:ss") else { return }
-        let textToWrite = "\(date) " + text + "\n"
-
-        if printLog { print(textToWrite) }
-        if levelLog > 0 {
-            logQueue.async(flags: .barrier) {
-                self.writeLogToDisk(filename: self.filenamePathLog, text: textToWrite)
-                if self.copyLogToDocumentDirectory, let path = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true).first {
-                    let filenameCopyToDocumentDirectory = path + "/" + self.filenameLog
-                    self.writeLogToDisk(filename: filenameCopyToDocumentDirectory, text: textToWrite)
-                }
-            }
-        }
-    }
-
-    private func writeLogToDisk(filename: String, text: String) {
-        guard let data = text.data(using: .utf8) else { return }
-
-        if !FileManager.default.fileExists(atPath: filename) {
-            FileManager.default.createFile(atPath: filename, contents: nil, attributes: nil)
-        }
-
-        if let fileHandle = FileHandle(forWritingAtPath: filename) {
-            fileHandle.seekToEndOfFile()
-            fileHandle.write(data)
-            fileHandle.closeFile()
-        }
     }
  }
