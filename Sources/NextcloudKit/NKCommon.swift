@@ -73,6 +73,8 @@ public struct NKCommon: Sendable {
     public let backgroundQueue = DispatchQueue(label: "com.nextcloud.nextcloudkit.backgroundqueue", qos: .background, attributes: .concurrent)
     private let logQueue = DispatchQueue(label: "com.nextcloud.nextcloudkit.queuelog", attributes: .concurrent )
 
+    public let notificationCenterChunkedFileStop = NSNotification.Name(rawValue: "NextcloudKit.chunkedFile.stop")
+
     public let headerAccount = "X-NC-Account"
     public let headerCheckInterceptor = "X-NC-CheckInterceptor"
     public let groupDefaultsUnauthorized = "Unauthorized"
